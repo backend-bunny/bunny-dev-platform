@@ -1,0 +1,9 @@
+keys:
+  - &admin_sara age1elxfhmc6d40evdl02tjr29pgem7crpq7kt09clc3qhvk7e3l5css9373gc
+  - &server_k3s_cp1
+  - &server_k3s_cp2
+creation_rules:
+  - path_regex: secrets/.*\.yaml$
+    key_groups:
+    - age:
+      - *admin_sara
