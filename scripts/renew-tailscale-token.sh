@@ -1,38 +1,57 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 
+# Function to log error
 error() {
     echo -e >&2 "\033[1;31mERROR:\033[0m ${1}"
 }
 
+# Function to log info
 info() {
     echo -e >&2 "\033[1;34mINFO:\033[0m ${1}"
 }
 
+# Function to log warning
 warning() {
     echo -e >&2 "\033[1;33mWARNING:\033[0m ${1}"
 }
 
+# Function to print usage
 usage() {
     echo "
 Usage: $(basename "${0}") OPTIONS
 
 Options:
   Required:
-    -s,--sops-file   <path>    Path to sops secrets file
+    -t,--sops-tailscale-file   <path>    Path to sops secrets file containg tailscale secrets
+    -m,--sops-machine-file     <path>    Path to sops file to write generated machine keys
+    -n,--node-name             <string>  Name of machine used for key when storing secret
 
   Optional:
-    -v,--version                               Print program version" 1>&2
+    -v,--version                         Print program version" 1>&2
     exit "${1:-0}"
 }
 
+if [ -z "$1" ]
+  then
+    usage
+fi
+
 while [ -n "$1" ]; do
     case $1 in
-        -s|--sops-file)
-            SOPS_FILE_PATH="$1"
+        -s|--sops-tailscale-file)
+            SOPS_TAILSCALE_FILE_PATH="$2"
             shift 2
             ;;
-        --help)
+        -m|--sops-machine-file)
+            SOPS_MACHINE_FILE_PATH="$2"
+            shift 2
+            ;;
+        -n|--node-name)
+            NODE_NAME="$2"
+            shift 2
+            ;;
+        -h|--help)
             usage 0
             ;;
         -v|--version)
@@ -52,29 +71,28 @@ while [ -n "$1" ]; do
     [ $? -ne 0 ] && echo "Broke when parsing options: '$1'" && usage 1
 done
 
+# Sanity check for required parameters
+if [ -z "$SOPS_TAILSCALE_FILE_PATH" ]; then
+    error "Missing required option: -s|--sops-tailscale-file"
+    usage 1
+fi
+
+if [ -z "$SOPS_MACHINE_FILE_PATH" ]; then
+    error "Missing required option: -m|--sops-machine-file"
+    usage 1
+fi
+
+if [ -z "$NODE_NAME" ]; then
+    error "Missing required option: -n|--node-name"
+    usage 1
+fi
 
 
-
-# Configuration variables
-# These should be set as environment variables or passed as arguments
-DOPPLER_TOKEN=${DOPPLER_TOKEN:-"your_doppler_token"}
-PROJECT=${PROJECT:-"your_project"}
-CONFIG=${CONFIG:-"your_config"}
-
-# Function to get secrets from Doppler
+# Function to get secrets from sops
 get_secrets() {
-    local token="$1"
+    local sops_tailscale_file_path="$1"
 
-    response=$(curl -s -X GET "https://api.doppler.com/v3/configs/config/secrets" \
-        -H "Authorization: Bearer $token")
-
-    # Check if the request was successful
-    if [[ $(echo "$response" | jq -r 'has("secrets")') != "true" ]]; then
-        echo "Error retrieving secrets: $(echo "$response" | jq -r '.message // "Unknown error"')" >&2
-        exit 1
-    fi
-
-    echo "$response"
+    sops --decrypt --extract '["tailscale"]' --output-type json "$sops_tailscale_file_path"
 }
 
 # Function to get Tailscale API token
@@ -89,7 +107,7 @@ get_tailscale_api_token() {
 
     # Check if the request was successful
     if [[ $(echo "$response" | jq -r 'has("access_token")') != "true" ]]; then
-        echo "Error getting API token: $(echo "$response" | jq -r '.message // "Unknown error"')" >&2
+        error "getting API token: $(echo "$response" | jq -r '.message // "Unknown error"')" >&2
         exit 1
     fi
 
@@ -109,7 +127,7 @@ create_tailscale_ephemeral_key() {
                 "reusable": true,
                 "ephemeral": true,
                 "preauthorized": true,
-                "tags": ["tag:all"]
+                "tags": ["tag:bunny-dev-platform"]
             }
         }
     },
@@ -126,69 +144,37 @@ EOF
 
     # Check if the request was successful
     if [[ $(echo "$response" | jq -r 'has("key")') != "true" ]]; then
-        echo "Error creating ephemeral key: $(echo "$response" | jq -r '.message // "Unknown error"')" >&2
+        error "creating ephemeral key: $(echo "$response" | jq -r '.message // "Unknown error"')" >&2
         exit 1
     fi
 
     echo "$response" | jq -r '.key'
 }
 
-# Function to update Doppler secret
-update_doppler_secret() {
-    local token="$1"
-    local project="$2"
-    local config="$3"
-    local tailscale_token="$4"
+# Function to update sops secret
+update_sops_secret() {
+    local sops_machine_file_path="$1"
+    local node_name="$2"
+    local tailscale_token="$3"
 
-    # Prepare the JSON payload
-    payload=$(cat <<EOF
-{
-    "project": "$project",
-    "config": "$config",
-    "change_requests": [
-        {
-            "name": "TAILSCALE_TOKEN",
-            "originalName": "TAILSCALE_TOKEN",
-            "value": "$tailscale_token"
-        }
-    ]
+    sops --set "[\"tailscale\"][\"$node_name\"] \"$tailscale_token\"" "$sops_machine_file_path"
 }
-EOF
-)
-
-    response=$(curl -s -X POST "https://api.doppler.com/v3/configs/config/secrets" \
-        -H "Authorization: Bearer $token" \
-        -H "Content-Type: application/json" \
-        -d "$payload")
-
-    # Check if the request was successful
-    if [[ $(echo "$response" | jq -r 'has("secrets")') != "true" ]]; then
-        echo "Error updating secret: $(echo "$response" | jq -r '.message // "Unknown error"')" >&2
-        exit 1
-    fi
-
-    echo "$response"
-}
-
-# Check for required dependencies
-command -v curl >/dev/null 2>&1 || { echo "Error: curl is required but not installed."; exit 1; }
-command -v jq >/dev/null 2>&1 || { echo "Error: jq is required but not installed."; exit 1; }
 
 # Main execution flow
-echo "Retrieving secrets from Doppler..."
-secrets=$(get_secrets "$DOPPLER_TOKEN")
+info "Retrieving secrets from sops file..."
+secrets=$(get_secrets "$SOPS_TAILSCALE_FILE_PATH")
 
 # Extract client ID and secret
-tailscale_client_id=$(echo "$secrets" | jq -r '.secrets.OAUTH_DEVICES_CLIENT_ID.raw')
-tailscale_client_secret=$(echo "$secrets" | jq -r '.secrets.OAUTH_DEVICES_CLIENT_SECRET.raw')
+tailscale_client_id=$(echo "$secrets" | jq -r '.clientID')
+tailscale_client_secret=$(echo "$secrets" | jq -r '.clientSecret')
 
-echo "Authenticating with Tailscale..."
+info "Authenticating with Tailscale..."
 access_token=$(get_tailscale_api_token "$tailscale_client_id" "$tailscale_client_secret")
 
-echo "Creating new Tailscale ephemeral key..."
+info "Creating new Tailscale ephemeral key..."
 ephemeral_key=$(create_tailscale_ephemeral_key "$access_token")
 
-echo "Updating TAILSCALE_TOKEN in Doppler..."
-update_doppler_secret "$DOPPLER_TOKEN" "$PROJECT" "$CONFIG" "$ephemeral_key" > /dev/null
+info "Updating TAILSCALE_TOKEN in sops..."
+update_sops_secret "$SOPS_MACHINE_FILE_PATH" "$NODE_NAME" "$ephemeral_key" > /dev/null
 
-echo "Updated TAILSCALE_TOKEN secret in doppler with new ephemeral key"
+info "Updated TAILSCALE_TOKEN secret in sops with new ephemeral key"

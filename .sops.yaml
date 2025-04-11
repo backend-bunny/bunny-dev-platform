@@ -1,9 +1,15 @@
 keys:
   - &admin_sara age1elxfhmc6d40evdl02tjr29pgem7crpq7kt09clc3qhvk7e3l5css9373gc
-  - &server_k3s_cp1
-  - &server_k3s_cp2
+  - &k3s-server-1 age1x7t8hf4nxpucj7ek0scs9nakn825gj5zfpxkrk0wsqthrf4534xsm3664j
+  - &k3s-server-2 age1cpkqgq03rylfzrruwamx4sgawm3d6vnjh3j7v8cpjg5ah3cymclqyq0pgm
 creation_rules:
-  - path_regex: secrets/.*\.yaml$
+  - path_regex: secrets/node-secrets.*\.yaml$
+    key_groups:
+    - age:
+      - *admin_sara
+      - *k3s-server-1
+      - *k3s-server-2
+  - path_regex: secrets/automation-secrets.*\.yaml$
     key_groups:
     - age:
       - *admin_sara
